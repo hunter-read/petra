@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+#verify docker installed
+if [ "$(which docker)" == "" ]; then
+  echo -e "\n\033[31mERROR\033[0m: Docker is not installed, please refer to installation instructions here: https://docs.docker.com/install/\n"
+  exit 1
+fi
+
+OPTIND=1
+
+pdbID=""
+ligandID=""
+custom=false
+wt_only=false
+threads=""
+custom_in=false
+input_dir=""
+output_dir="./output"
+command=""
+
+#handle options
+while getopts ":hgRwcvp:i:o:" flag; do
+case "$flag" in
+    h)
+      echo ""
+      echo "USAGE: petra [options] pdbID ligandID"
+      echo ""
+      echo "Run PEtRA in a docker container"
+      echo ""
+      echo "Options:"
+      echo " -h  Print this help dialog"
+      echo " -v  Print version information"
+      echo " -g  Get petra image if not already pulled"
+      echo " -R  Remove the petra image. Requires re-pulling image on subsequent runs"
+      echo " -w  Run on only the Wild Type input data. Generates mutant ligand pdbs and cifs but does not execute rigidity analysis on mutant ligands"
+      echo " -c  Run with custom input data at pdbID.ligandID.input"
+      echo " -p  Run mutant ligand rigidity analysis in parallel, using specified number of threads"
+      echo "      Ex: petra -p6 4ZE6 011"
+      echo " -i  Run with custom input directory path, requires path to folder of input. Requires -c option"
+      echo "      Ex: petra -ci ./4ZE6.011.input 4ZE6 011"
+      echo " -o  Output data to specified directory. Will make directory if none exists"
+      echo "      Ex: petra -o ./4ZE6.011.output 4ZE6 011"
+      echo ""
+      exit 0
+      ;;
+    v)
+      echo "petra 1.0.0 (docker)"
+      echo "Release-Date: May 15, 2019"
+      exit
+      ;;
+    g)
+      echo -e "\n\033[36mINFO\033[0m: Pulling petra docker image, this may take some time.\n"
+      docker pull hunterreadca/petra
+      exit 0
+      ;;
+    R)
+      read -p "Are you sure you want to delete the petra image? [y/N] " -n 1 -r
+      echo    # (optional) move to a new line
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+          docker image rm -f hunterreadca/petra
+      fi
+      exit 0
+      ;;
+    w)
+      wt_only=true
+      ;;
+    c)
+      custom=true
+      ;;
+    p)
+      threads="-e PETRATHREADS=$OPTARG"
+      ;;
+    i)
+      input_dir=$OPTARG
+      custom_in=true
+      if [ ! -d "${input_dir}" ]; then
+        -e "\n\033[31mERROR\033[0m: ${input_dir} is not a directory\n"
+        exit 1
+      fi
+      ;;
+    o)
+      output_dir=$OPTARG
+      ;;
+    \? ) echo -e "\n\033[31mInvalid option\033[0m: -$OPTARG exiting\n"
+      exit 1
+       ;;
+     : ) echo -e "\n\033[31mERROR\033[0m: Option -$OPTARG requires an argument\n"
+       exit 1
+       ;;
+esac
+done
+
+#check if docker image exsists
+if [ "$(docker images -q hunterreadca/petra)" == "" ]; then
+  echo -e "\n\033[31mERROR\033[0m: Petra image does not exsist, please run petra -g"
+fi
+
+pdbID=${@:$OPTIND:1}
+ligandID=${@:$OPTIND+1:1}
+
+#verify positional args
+if [ "$pdbID" == "" ]; then
+  echo -e "\n\033[31mERROR\033[0m: pdbID is required \n\n USAGE: ./petra.sh [options] pdbID ligandID \n See petra -h \n"
+  exit 1
+fi
+if [ "$ligandID" == "" ]; then
+  echo -e "\n\033[31mERROR\033[0m: ligandID is required \n\n USAGE: ./petra.sh [options] pdbID ligandID \n See petra -h \n"
+  exit 1
+fi
+
+#capitilize pdb and ligand ids
+pdbID=$(echo $pdbID | tr a-z A-Z)
+ligandID=$(echo $ligandID | tr a-z A-Z)
+
+#create output directory if does not exist
+if [ ! -d "$output_dir" ]; then
+  mkdir $output_dir
+fi
+
+#check custom input directory
+if [ "$custom" == "true" ];
+then
+  if [[ "$custom_in" == "false" && ! -d "./$pdbID.$ligandID.input" ]]; then
+    echo -e "\n\033[31mERROR\033[0m: Directory $pdbID.$ligandID.input not found for custom input\n"
+    exit 1
+  elif [ "$custom_in" == "false" ]; then
+    input_dir="./$pdbID.$ligandID.input"
+  fi
+fi
+
+
+
+#start docker container
+id="$pdbID-$ligandID"
+docker run --name $id -t -d --rm hunterreadca/petra bash
+
+#define main runtime command and copy input files
+if [ "$custom" == "true" ]; then
+
+  docker cp $input_dir $id:/petra/pipeline/
+
+  if [ "$wt_only" == "true" ]; then
+    command="/petra/invokePipelineWTCustom.sh"
+  else
+    command="/petra/invokePipeline.sh -c"
+  fi
+
+else
+
+  if [ "$wt_only" == "true" ]; then
+    command="/petra/invokePipelineWT.sh"
+  else
+    command="/petra/invokePipeline.sh"
+  fi
+
+fi
+
+#exectute pipeline in docker
+docker exec -it $threads $id bash $command $pdbID $ligandID
+
+#copy output files
+docker cp $id:/petra/output/$pdbID $output_dir
+docker kill $id
